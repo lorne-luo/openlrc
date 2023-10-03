@@ -105,6 +105,8 @@ class Preprocessor:
         with ProcessPoolExecutor() as executor:
             _ = [executor.submit(loudness_norm_single, *arg) for arg in args]
 
+        logger.info(f'Loudness normalizing finished: {ln_audio_paths}')
+
         return ln_audio_paths
 
     def run(self, noise_suppress=False):

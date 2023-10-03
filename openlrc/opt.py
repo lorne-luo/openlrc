@@ -19,12 +19,13 @@ cut_long_threshold = {
 
 
 class SubtitleOptimizer:
-    def __init__(self, subtitle: Union[Path, Subtitle]):
+    def __init__(self, subtitle: Union[Path, Subtitle], target_lang: str):
         if isinstance(subtitle, Path):
             subtitle = Subtitle.from_json(subtitle)
 
         self.subtitle = subtitle
         self.lang = self.subtitle.lang
+        self.target_lang = target_lang
 
     @property
     def filename(self):
@@ -119,6 +120,14 @@ class SubtitleOptimizer:
 
         self.subtitle.segments = new_elements
 
+    def mandarin2traditional(self):
+        new_elements = self.subtitle.segments
+
+        for i, element in enumerate(new_elements):
+            new_elements[i].text = zhconv.convert(element.text, locale='zh-tw')
+
+        self.subtitle.segments = new_elements
+
     def remove_unk(self):
         new_elements = self.subtitle.segments
 
@@ -139,8 +148,11 @@ class SubtitleOptimizer:
             self.remove_unk()
             self.remove_empty()
 
-            if self.subtitle.lang.lower() == 'zh-cn':
-                self.traditional2mandarin()
+            if self.lang.startswith('zh') and self.target_lang.startswith('zh'):
+                if self.target_lang.lower() in ['zh-cn', 'zh-hans']:
+                    self.traditional2mandarin()
+                elif self.target_lang.lower() in ['zh-hk', 'zh-tw', 'zh-hant']:
+                    self.mandarin2traditional()
 
     def save(self, output_name=None, update_name=False):
         optimized_name = extend_filename(self.filename, '_optimized') if not output_name else output_name

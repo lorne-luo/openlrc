@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import NamedTuple, Union, List
 
 import pysbd
+import torch
 from faster_whisper.transcribe import WhisperModel, Segment
 from pysbd.languages import LANGUAGE_CODES
 from tqdm import tqdm
@@ -20,17 +21,21 @@ class TranscriptionInfo(NamedTuple):
 
 
 class Transcriber:
-    def __init__(self, model_name='large-v2', compute_type='float16', device='cuda',
+    def __init__(self, model_name='large-v2',
                  asr_options=default_asr_options, vad_options=default_vad_options):
         self.model_name = model_name
-        self.compute_type = compute_type
-        self.device = device
         # self.no_need_align = ['en', 'ja', 'zh']  # Languages that is accurate enough without sentence alignment
         self.non_word_boundary = ['ja', 'zh']
         self.asr_options = asr_options
         self.vad_options = vad_options
+        if torch.cuda.is_available():
+            self.device = 'cuda'
+            self.compute_type = 'float16'
+        else:
+            self.device = 'cpu'
+            self.compute_type = 'int8'
 
-        self.whisper_model = WhisperModel(model_name, device, compute_type=compute_type, num_workers=2)
+        self.whisper_model = WhisperModel(model_name, self.device, compute_type=self.compute_type, num_workers=2)
 
     def transcribe(self, audio_path: Union[str, Path], language=None, vad_filter=True):
         seg_gen, info = self.whisper_model.transcribe(str(audio_path), language=language,

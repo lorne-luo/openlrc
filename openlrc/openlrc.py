@@ -4,6 +4,8 @@
 import concurrent.futures
 import json
 import shutil
+import traceback
+from multiprocessing import freeze_support
 from pathlib import Path
 from pprint import pformat
 from queue import Queue
@@ -19,7 +21,7 @@ from openlrc.opt import SubtitleOptimizer
 from openlrc.preprocess import Preprocessor
 from openlrc.subtitle import Subtitle
 from openlrc.transcribe import Transcriber
-from openlrc.translate import GPTTranslator
+from openlrc.translate import GPTTranslator, MSTranslator
 from openlrc.utils import Timer, extend_filename, get_audio_duration, format_timestamp, extract_audio, \
     get_file_type
 
@@ -39,12 +41,15 @@ class LRCer:
     :param vad_options: Parameters for VAD model.
     """
 
-    def __init__(self, model_name='large-v2', compute_type='float16', fee_limit=0.1, consumer_thread=11,
+    def __init__(self, model_name='large-v2', target_lang='zh-cn', fee_limit=0.1, consumer_thread=11,
                  asr_options=None, vad_options=None, preprocess_options=None):
+        freeze_support()
+
         self.fee_limit = fee_limit
         self.api_fee = 0  # Can be updated in different thread, operation should be thread-safe
         self.from_video = set()
         self.context: Context = Context()
+        self.target_lang = target_lang
 
         self._lock = Lock()
         self.exception = None
@@ -67,8 +72,8 @@ class LRCer:
         if preprocess_options:
             self.preprocess_options.update(preprocess_options)
 
-        self.transcriber = Transcriber(model_name=model_name, compute_type=compute_type,
-                                       asr_options=self.asr_options, vad_options=self.vad_options)
+        self.transcriber = Transcriber(model_name=model_name, asr_options=self.asr_options,
+                                       vad_options=self.vad_options)
 
     def transcription_producer(self, transcription_queue, audio_paths, src_lang):
         """
@@ -76,7 +81,8 @@ class LRCer:
         """
         for audio_path in audio_paths:
             transcribed_path = extend_filename(audio_path, '_transcribed').with_suffix('.json')
-            if not transcribed_path.exists():
+            optimized_path = extend_filename(audio_path, '_transcribed_optimized').with_suffix('.json')
+            if not optimized_path.exists():
                 with Timer('Transcription process'):
                     logger.info(
                         f'Audio length: {audio_path}: {format_timestamp(get_audio_duration(audio_path), fmt="srt")}')
@@ -110,8 +116,8 @@ class LRCer:
         Parallel translation.
         """
         while True:
-            logger.debug(f'Translation worker waiting transcription...')
             transcribed_path = transcription_queue.get()
+            logger.debug(f'Translation worker waiting transcription...{transcribed_path}')
 
             if transcribed_path is None:
                 transcription_queue.put(None)
@@ -128,6 +134,7 @@ class LRCer:
 
             final_subtitle = transcribed_opt_sub
             final_subtitle.filename = Path(translated_path.parent / f'{audio_name}.json')
+
             if not skip_trans and not final_subtitle.exists():
                 with Timer('Translation process'):
                     try:
@@ -137,10 +144,9 @@ class LRCer:
                         self.exception = e
 
             # Copy preprocessed/xxx_preprocessed.lrc or preprocessed/xxx_preprocessed.srt to xxx.lrc or xxx.srt
-            if audio_name in self.from_video:
-                subtitle_path = final_subtitle.to_srt()
-            else:
-                subtitle_path = final_subtitle.to_lrc()
+            # if audio_name in self.from_video:
+            srt_path = final_subtitle.to_srt()
+            subtitle_path = final_subtitle.to_lrc()
 
             suffix = subtitle_path.suffix
             shutil.copy(subtitle_path,
@@ -149,12 +155,14 @@ class LRCer:
             logger.info(f'Translation fee til now: {self.api_fee:.4f} USD')
 
     def _translate(self, audio_name, prompter, target_lang, transcribed_opt_sub, translated_path):
+        logger.info(f'Start translation for {translated_path}')
         json_filename = Path(translated_path.parent / (audio_name + '.json'))
         compare_path = Path(translated_path.parent, f'{audio_name}_compare.json')
         if not translated_path.exists():
             if not compare_path.exists():
                 # Translate the transcribed json
-                translator = GPTTranslator(prompter=prompter, fee_limit=self.fee_limit)
+                # translator = GPTTranslator(prompter=prompter, fee_limit=self.fee_limit)
+                translator = MSTranslator()
                 context = self.context
 
                 target_texts = translator.translate(
@@ -177,6 +185,7 @@ class LRCer:
                 if len(target_texts) != len(transcribed_opt_sub):
                     logger.error(f'Compare json file {compare_path} is not valid.')
                     raise ValueError(f'Compare json file {compare_path} is not valid.')
+
             transcribed_opt_sub.set_texts(target_texts, lang=target_lang)
 
             # xxx_transcribed_optimized_translated.json
@@ -205,6 +214,7 @@ class LRCer:
         :param skip_trans: Whether to skip the translation process. (Default to False)
         :param noise_suppress: Whether to suppress the noise in the audio. (Default to False)
         """
+        self.target_lang = target_lang
         if not paths:
             logger.warning('No audio/video file given. Skip LRCer.run()')
             return
@@ -234,7 +244,7 @@ class LRCer:
 
         transcription_queue = Queue()
 
-        with Timer('Transcription (Producer) and Translation (Consumer) process'):
+        with Timer('Transcription (Producer) and Translation (Consumer) process') as timer:
             consumer = concurrent.futures.ThreadPoolExecutor(thread_name_prefix='Consumer') \
                 .submit(self.transcription_consumer, transcription_queue, target_lang, prompter, skip_trans)
             producer = concurrent.futures.ThreadPoolExecutor(thread_name_prefix='Producer') \
@@ -242,9 +252,10 @@ class LRCer:
 
             producer.result()
             consumer.result()
+            logger.info(f'Multi-threads translation finished in {timer.duration}')
 
             if self.exception:
-                # traceback.print_exception(type(self.exception), self.exception, self.exception.__traceback__)
+                traceback.print_exception(type(self.exception), self.exception, self.exception.__traceback__)
                 raise self.exception
 
         logger.info(f'Totally used API fee: {self.api_fee:.4f} USD')
@@ -290,10 +301,10 @@ class LRCer:
 
         return paths
 
-    @staticmethod
-    def post_process(transcribed_sub: Path, output_name: Path = None, remove_files: List[Path] = None,
+    def post_process(self, transcribed_sub: Path, output_name: Path = None, remove_files: List[Path] = None,
                      update_name=False):
-        optimizer = SubtitleOptimizer(transcribed_sub)
+        logger.info(f'Start Post-Process for Optimation')
+        optimizer = SubtitleOptimizer(transcribed_sub, self.target_lang)
         optimizer.perform_all()
         optimizer.save(output_name, update_name=update_name)
 

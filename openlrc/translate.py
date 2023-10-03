@@ -119,9 +119,10 @@ class MSTranslator:
     def __init__(self):
         self.key = os.environ['MS_TRANSLATOR_KEY']
         self.endpoint = 'https://api.cognitive.microsofttranslator.com'
-        self.location = 'eastasia'
+        self.location = os.environ.get('MS_TRANSLATOR_LOCATION', 'eastus')
         self.path = '/translate'
         self.constructed_url = self.endpoint + self.path
+        self.api_fee = 0
 
         self.headers = {
             'Ocp-Apim-Subscription-Key': self.key,
@@ -130,7 +131,8 @@ class MSTranslator:
             'X-ClientTraceId': str(uuid.uuid4())
         }
 
-    def translate(self, texts, src_lang, target_lang):
+    def translate(self, texts, src_lang, target_lang, audio_type='Anime', title='',
+                  background='', description='', compare_path='translate_intermediate.json'):
         params = {
             'api-version': '3.0',
             'from': src_lang,
@@ -145,4 +147,5 @@ class MSTranslator:
             raise RuntimeError('Failed to connect to Microsoft Translator API.')
         response = request.json()
 
-        return json.dumps(response, sort_keys=True, ensure_ascii=False, indent=4, separators=(',', ': '))
+        texts = [', '.join([i['text'] for i in r['translations']]) for r in response]
+        return texts
